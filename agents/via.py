@@ -4,6 +4,7 @@ from typing import Any
 import flax
 import jax
 import jax.numpy as jnp
+from jax.scipy.special import ndtri
 import ml_collections
 import optax
 
@@ -59,6 +60,25 @@ Training is strictly independent of flow_steps (F is inference-only).
 
 
 
+
+    def _sample_v0_noise(self, rng, action_shape):
+        K = int(self.config['num_v0_samples'])
+        assert K % 2 == 0
+        m = K // 2
+        B, A = action_shape
+        g_rng, r_rng = jax.random.split(rng)
+        g = jax.random.normal(g_rng, (m, B, A))
+        qs = []
+        for i in range(m):
+            v = g[i]
+            for j in range(i - (i % A), i):           
+                v = v - jnp.sum(v * qs[j], axis=-1, keepdims=True) * qs[j]
+            qs.append(v / (jnp.linalg.norm(v, axis=-1, keepdims=True) + 1e-8))
+        dirs = jnp.stack(qs, axis=0)                   # (m, B, A)
+        radius = jnp.sqrt(float(A))
+        half = radius * dirs
+        return jnp.concatenate([half, -half], axis=0)  # (K, B, A)
+
     def _sample_step(self, rng, t):
         """delta ~ Unif(0, 1-t+eps); snap to the boundary (t=1) past the remaining time.
         P(bound | t) = eps / (1-t+eps): ~eps at t=0, -> 1 as t -> 1.
@@ -89,7 +109,7 @@ Training is strictly independent of flow_steps (F is inference-only).
         next_obs = batch['next_observations'][..., -1, :]
 
         # ---- 1) environment Bellman target (noise-marginalized, no policy rollout) ----
-        z_next = jax.random.normal(zn_rng, (self.config['num_v0_samples'], *batch_actions.shape))
+        z_next = self._sample_v0_noise(zn_rng, batch_actions.shape)
         next_vs = jax.vmap(lambda zz: self._agg(
             self._v('target_critic', next_obs, zz, 0.0)))(z_next)
         next_v = next_vs.mean(axis=0)
@@ -363,7 +383,7 @@ def get_config():
             lmbda=3.0,
             beta=0.2,
             margin=0.05,
-            num_v0_samples=32
+            num_v0_samples=8
         )
     )
     return config
